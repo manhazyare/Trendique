@@ -1,0 +1,293 @@
+/*
+===============================================================================
+Load Clean Customer, Product, and Transaction Data → Silver Layer
+===============================================================================
+Purpose:
+    This script loads cleaned and standardized data from Bronze → Silver.
+
+Cleaning performed:
+    1. Remove blanks and spaces
+    2. Replace missing values
+    3. Generate missing customer names from email
+    4. Standardize country values
+    5. Standardize gender values
+    6. Convert mixed date formats into ISO format (yyyy-mm-dd)
+    7. Remove duplicate transactions
+===============================================================================
+*/
+
+
+/*=============================================================================
+STEP 1: CLEAN CUSTOMER DATA
+Purpose:
+    Prepare customer records before loading into Silver.
+=============================================================================*/
+
+;WITH customer_clean AS (
+
+-- Remove leading/trailing spaces
+-- Convert empty strings ('') into NULL values
+SELECT
+    cst_id,
+    NULLIF(TRIM(fll_nme),'') AS fll_nme,
+    NULLIF(TRIM(em),'') AS em,
+    NULLIF(TRIM(cty),'') AS cty,
+    NULLIF(TRIM(ctry),'') AS ctry,
+    NULLIF(TRIM(brd_dte),'') AS brd_dte,
+    NULLIF(TRIM(grd),'') AS grd,
+
+    -- Extract username section before @
+    -- Example:
+    -- david.bekele342@mail.com → david.bekele342
+    CASE
+        WHEN em IS NOT NULL
+            AND CHARINDEX('@', em) > 0
+        THEN LEFT(em, CHARINDEX('@', em)-1)
+    END AS email_name
+
+FROM bronze.customers
+),
+
+email_split AS (
+
+-- Split extracted email text into first and last names
+SELECT
+*,
+
+-- Extract first name
+-- david.bekele342 → david
+LEFT(
+    email_name,
+    CHARINDEX('.', email_name + '.') - 1
+) AS first_name,
+
+-- Extract last name
+-- david.bekele342 → bekele
+LEFT(
+    SUBSTRING(
+        email_name,
+        CHARINDEX('.', email_name + '.') + 1,
+        LEN(email_name)
+    ),
+    PATINDEX(
+        '%[0-9]%',
+        SUBSTRING(
+            email_name,
+            CHARINDEX('.', email_name + '.') + 1,
+            LEN(email_name)
+        ) + '0'
+    ) - 1
+) AS last_name
+
+FROM customer_clean
+)
+
+
+/*=============================================================================
+STEP 2: LOAD CLEAN CUSTOMER DATA
+Purpose:
+    Apply transformations and insert final records into Silver.
+=============================================================================*/
+
+INSERT INTO silver.customers
+(
+cst_id,
+fll_nme,
+em,
+cty,
+ctry,
+grd,
+brd_dte
+)
+
+SELECT
+
+cst_id,
+
+-- Use existing full name
+-- Otherwise build from email
+-- If both missing → N/A
+CASE
+    WHEN fll_nme IS NOT NULL
+        THEN fll_nme
+
+    WHEN em IS NOT NULL
+        THEN CONCAT(
+            UPPER(LEFT(first_name,1)),
+            LOWER(SUBSTRING(first_name,2,LEN(first_name))),
+            ' ',
+            UPPER(LEFT(last_name,1)),
+            LOWER(SUBSTRING(last_name,2,LEN(last_name)))
+        )
+
+    ELSE 'N/A'
+END,
+
+-- Replace missing email
+ISNULL(em,'N/A'),
+
+-- Replace missing city
+ISNULL(cty,'N/A'),
+
+-- Standardize country codes
+CASE
+    WHEN ctry='KE' THEN 'Kenya'
+    WHEN ctry='NGR' THEN 'Nigeria'
+    WHEN ctry='ZBBW' THEN 'Zimbabwe'
+    WHEN ctry='GHN' THEN 'Ghana'
+    WHEN ctry='S A' THEN 'South Africa'
+    WHEN ctry='TZ' THEN 'Tanzania'
+    WHEN ctry='UG' THEN 'Uganda'
+    WHEN ctry='RW' THEN 'Rwanda'
+    WHEN ctry='ETH' THEN 'Ethiopia'
+    WHEN ctry='ZMB' THEN 'Zambia'
+    ELSE 'N/A'
+END,
+
+-- Convert gender codes into readable values
+CASE
+    WHEN grd='M' THEN 'Male'
+    WHEN grd='F' THEN 'Female'
+    ELSE 'N/A'
+END,
+
+-- Convert multiple date formats into ISO format
+CASE
+    WHEN TRY_CONVERT(DATE, brd_dte,101) IS NOT NULL
+        THEN CONVERT(VARCHAR(10),
+             TRY_CONVERT(DATE, brd_dte,101),23)
+
+    WHEN TRY_CONVERT(DATE, brd_dte,103) IS NOT NULL
+        THEN CONVERT(VARCHAR(10),
+             TRY_CONVERT(DATE, brd_dte,103),23)
+
+    WHEN TRY_CONVERT(DATE, brd_dte,106) IS NOT NULL
+        THEN CONVERT(VARCHAR(10),
+             TRY_CONVERT(DATE, brd_dte,106),23)
+
+    ELSE NULL
+END
+
+FROM email_split;
+
+
+
+/*=============================================================================
+STEP 3: CLEAN PRODUCT DATA
+Purpose:
+    Fill missing supplier values.
+=============================================================================*/
+
+INSERT INTO silver.products
+(
+prd_id,
+prd_nm,
+ctg,
+sctg,
+brnd,
+unt_pr,
+cst_pr,
+stk_qty,
+spp
+)
+
+SELECT
+prd_id,
+prd_nm,
+ctg,
+sctg,
+brnd,
+unt_pr,
+cst_pr,
+stk_qty,
+
+-- Replace missing supplier with N/A
+CASE
+    WHEN spp IS NULL THEN 'N/A'
+    ELSE spp
+END
+
+FROM bronze.products;
+
+
+
+/*=============================================================================
+STEP 4: CLEAN TRANSACTION DATA
+Purpose:
+    Standardize dates, clean text fields,
+    and remove duplicate transactions.
+=============================================================================*/
+
+SELECT
+
+-- Unique transaction identifier
+trns_id,
+
+-- Convert mixed date formats
+CASE
+    WHEN TRY_CONVERT(DATE,trns_dte,101) IS NOT NULL
+        THEN CONVERT(VARCHAR(10),
+             TRY_CONVERT(DATE,trns_dte,101),23)
+
+    WHEN TRY_CONVERT(DATE,trns_dte,103) IS NOT NULL
+        THEN CONVERT(VARCHAR(10),
+             TRY_CONVERT(DATE,trns_dte,103),23)
+
+    WHEN TRY_CONVERT(DATE,trns_dte,106) IS NOT NULL
+        THEN CONVERT(VARCHAR(10),
+             TRY_CONVERT(DATE,trns_dte,106),23)
+
+    ELSE NULL
+END AS trns_dte,
+
+-- Preserve relationships
+cst_id,
+prd_id,
+
+-- Numeric fields
+qty,
+ord_value,
+
+-- Replace blanks with N/A
+CASE
+    WHEN NULLIF(TRIM(pm),'') IS NULL
+        THEN 'N/A'
+    ELSE pm
+END AS pm,
+
+CASE
+    WHEN NULLIF(TRIM(ord_sts),'') IS NULL
+        THEN 'N/A'
+    ELSE ord_sts
+END AS ord_sts,
+
+CASE
+    WHEN NULLIF(TRIM(chnl),'') IS NULL
+        THEN 'N/A'
+    ELSE chnl
+END AS chnl,
+
+CASE
+    WHEN NULLIF(TRIM(nts),'') IS NULL
+        THEN 'N/A'
+    ELSE nts
+END AS nts
+
+FROM
+(
+    SELECT
+        *,
+
+        -- Detect duplicate transaction IDs
+        ROW_NUMBER()
+        OVER (
+            PARTITION BY trns_id
+            ORDER BY trns_id
+        ) AS flag
+
+    FROM bronze.transactions
+
+) t
+
+-- Keep only one record per transaction
+WHERE flag = 1;
