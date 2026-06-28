@@ -1,1 +1,327 @@
 
+/*
+===============================================================================
+Stored Procedure: silver.load_silver
+===============================================================================
+
+Script Purpose:
+    This stored procedure transforms and loads data from the bronze layer
+    into the silver layer.
+
+Transformation Rules:
+    - Remove duplicates
+    - Trim and standardize text values
+    - Generate missing customer names from email
+    - Standardize country and gender values
+    - Convert invalid date formats
+    - Replace null values
+
+Actions Performed:
+    1. Truncate silver tables
+    2. Transform bronze data
+    3. Load cleaned data into silver tables
+
+WARNING:
+    Running this procedure truncates existing silver data.
+===============================================================================
+*/
+
+CREATE OR ALTER PROCEDURE silver.load_silver
+AS
+BEGIN
+
+    DECLARE
+        @start_time DATETIME,
+        @end_time DATETIME,
+        @batch_start DATETIME,
+        @batch_end DATETIME;
+
+    BEGIN TRY
+
+        SET @batch_start = GETDATE();
+
+        PRINT '===========================================';
+        PRINT 'Silver Layer Loading Started';
+        PRINT '===========================================';
+
+
+        /*=====================================================================
+            1) LOAD CUSTOMER DATA
+        =====================================================================*/
+
+        SET @start_time = GETDATE();
+
+        PRINT '>> Truncating Table: silver.customers';
+
+        TRUNCATE TABLE silver.customers;
+
+        PRINT '>> Loading Data: silver.customers';
+
+
+        ;WITH customer_clean AS
+        (
+
+            SELECT
+                cst_id,
+                NULLIF(TRIM(fll_nme),'') AS fll_nme,
+                NULLIF(TRIM(em),'') AS em,
+                NULLIF(TRIM(cty),'') AS cty,
+                NULLIF(TRIM(ctry),'') AS ctry,
+                NULLIF(TRIM(brd_dte),'') AS brd_dte,
+                NULLIF(TRIM(grd),'') AS grd,
+
+                CASE
+                    WHEN em IS NOT NULL
+                    AND CHARINDEX('@', em) > 0
+                    THEN LEFT(em, CHARINDEX('@', em)-1)
+                END AS email_name
+
+            FROM bronze.customers
+
+        ),
+
+        email_split AS
+        (
+
+            SELECT
+                *,
+
+                LEFT
+                (
+                    email_name,
+                    CHARINDEX('.', email_name + '.') - 1
+                ) AS first_name,
+
+                LEFT
+                (
+                    SUBSTRING
+                    (
+                        email_name,
+                        CHARINDEX('.', email_name + '.') + 1,
+                        LEN(email_name)
+                    ),
+
+                    PATINDEX
+                    (
+                        '%[0-9]%',
+                        SUBSTRING
+                        (
+                            email_name,
+                            CHARINDEX('.', email_name + '.') + 1,
+                            LEN(email_name)
+                        ) + '0'
+                    ) - 1
+
+                ) AS last_name
+
+            FROM customer_clean
+
+        )
+
+        INSERT INTO silver.customers
+        (
+            cst_id,
+            fll_nme,
+            em,
+            cty,
+            ctry,
+            grd,
+            brd_dte
+        )
+
+        SELECT
+
+            cst_id,
+
+            CASE
+                WHEN fll_nme IS NOT NULL
+                    THEN fll_nme
+
+                WHEN em IS NOT NULL
+                    THEN CONCAT
+                    (
+                        UPPER(LEFT(first_name,1)),
+                        LOWER(SUBSTRING(first_name,2,LEN(first_name))),
+                        ' ',
+                        UPPER(LEFT(last_name,1)),
+                        LOWER(SUBSTRING(last_name,2,LEN(last_name)))
+                    )
+
+                ELSE 'N/A'
+            END,
+
+            ISNULL(em,'N/A'),
+
+            ISNULL(cty,'N/A'),
+
+            CASE
+                WHEN ctry='KE' THEN 'Kenya'
+                WHEN ctry='NGR' THEN 'Nigeria'
+                WHEN ctry='ZBBW' THEN 'Zimbabwe'
+                WHEN ctry='GHN' THEN 'Ghana'
+                WHEN ctry='S A' THEN 'South Africa'
+                WHEN ctry='TZ' THEN 'Tanzania'
+                WHEN ctry='UG' THEN 'Uganda'
+                WHEN ctry='RW' THEN 'Rwanda'
+                WHEN ctry='ETH' THEN 'Ethiopia'
+                WHEN ctry='ZMB' THEN 'Zambia'
+                ELSE 'N/A'
+            END,
+
+            CASE
+                WHEN grd='M' THEN 'Male'
+                WHEN grd='F' THEN 'Female'
+                ELSE 'N/A'
+            END,
+
+            CASE
+                WHEN TRY_CONVERT(DATE, brd_dte,101) IS NOT NULL
+                    THEN TRY_CONVERT(DATE, brd_dte,101)
+
+                WHEN TRY_CONVERT(DATE, brd_dte,103) IS NOT NULL
+                    THEN TRY_CONVERT(DATE, brd_dte,103)
+
+                WHEN TRY_CONVERT(DATE, brd_dte,106) IS NOT NULL
+                    THEN TRY_CONVERT(DATE, brd_dte,106)
+
+                ELSE NULL
+            END
+
+        FROM email_split;
+
+        PRINT '>> customers Loaded Successfully';
+
+
+
+        /*=====================================================================
+            2) LOAD PRODUCT DATA
+        =====================================================================*/
+
+        PRINT '>> Truncating Table: silver.products';
+
+        TRUNCATE TABLE silver.products;
+
+        INSERT INTO silver.products
+        (
+            prd_id,
+            prd_nm,
+            ctg,
+            sctg,
+            brnd,
+            unt_pr,
+            cst_pr,
+            stk_qty,
+            spp
+        )
+
+        SELECT
+            prd_id,
+            prd_nm,
+            ctg,
+            sctg,
+            brnd,
+            unt_pr,
+            cst_pr,
+            stk_qty,
+            ISNULL(spp,'N/A')
+
+        FROM bronze.products;
+
+        PRINT '>> products Loaded Successfully';
+
+
+
+        /*=====================================================================
+            3) LOAD TRANSACTION DATA
+        =====================================================================*/
+
+        PRINT '>> Truncating Table: silver.transactions';
+
+        TRUNCATE TABLE silver.transactions;
+
+        INSERT INTO silver.transactions
+        (
+            trns_id,
+            trns_dte,
+            cst_id,
+            prd_id,
+            qty,
+            ord_value,
+            pm,
+            ord_sts,
+            chnl,
+            nts
+        )
+
+        SELECT
+            trns_id,
+
+            CASE
+                WHEN TRY_CONVERT(DATE,trns_dte,101) IS NOT NULL
+                    THEN TRY_CONVERT(DATE,trns_dte,101)
+
+                WHEN TRY_CONVERT(DATE,trns_dte,103) IS NOT NULL
+                    THEN TRY_CONVERT(DATE,trns_dte,103)
+
+                WHEN TRY_CONVERT(DATE,trns_dte,106) IS NOT NULL
+                    THEN TRY_CONVERT(DATE,trns_dte,106)
+
+                ELSE NULL
+            END,
+
+            cst_id,
+            prd_id,
+            qty,
+            ord_value,
+
+            ISNULL(NULLIF(TRIM(pm),''),'N/A'),
+            ISNULL(NULLIF(TRIM(ord_sts),''),'N/A'),
+            ISNULL(NULLIF(TRIM(chnl),''),'N/A'),
+            ISNULL(NULLIF(TRIM(nts),''),'N/A')
+
+        FROM
+        (
+            SELECT
+                *,
+                ROW_NUMBER()
+                OVER
+                (
+                    PARTITION BY trns_id
+                    ORDER BY trns_id
+                ) AS flag
+
+            FROM bronze.transactions
+
+        ) t
+
+        WHERE flag = 1;
+
+
+        SET @batch_end = GETDATE();
+
+        PRINT '===========================================';
+        PRINT 'Silver Layer Loading Completed';
+
+        PRINT 'Total Duration: '
+            + CAST(DATEDIFF(SECOND,@batch_start,@batch_end) AS NVARCHAR)
+            + ' seconds';
+
+        PRINT '===========================================';
+
+    END TRY
+
+
+    BEGIN CATCH
+
+        PRINT '===========================================';
+        PRINT 'ERROR DURING SILVER LOAD';
+        PRINT '===========================================';
+
+        PRINT ERROR_MESSAGE();
+
+    END CATCH
+
+END;
+GO
+
+
