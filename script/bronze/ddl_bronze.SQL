@@ -38,7 +38,7 @@ CREATE TABLE bronze.customers
     em                     NVARCHAR(100),
     cty                    NVARCHAR(50),
     ctry                   NVARCHAR(50),
-    brd_dte                DATE,
+    brd_dte                NVARCHAR(50),
     grd                    NVARCHAR(50)
 );
 GO
@@ -78,7 +78,7 @@ GO
 CREATE TABLE bronze.transactions
 (
     trns_id                NVARCHAR(50),
-    trns_dte               DATE,
+    trns_dte               NVARCHAR(50),
     cst_id                 NVARCHAR(50),
     prd_id                 NVARCHAR(50),
     qty                    INT,
